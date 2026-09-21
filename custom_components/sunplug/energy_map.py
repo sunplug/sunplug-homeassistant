@@ -40,6 +40,11 @@ class EnergyRoles:
     battery: list[str] = field(default_factory=list)
     battery_soc: list[str] = field(default_factory=list)
     battery_configured: bool = False
+    # For a power sensor HA generates from ``power_config`` (inverted or
+    # two-sensor), the user's own sensors behind it. The generated entity
+    # belongs to the ``energy`` integration; the integration worth naming is
+    # the one that owns these.
+    origins: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def has_required(self) -> bool:
@@ -59,6 +64,17 @@ class EnergyRoles:
     def all_tracked_entities(self) -> set[str]:
         """Return every entity that should be observed for state changes."""
         return {*self.solar, *self.grid, *self.battery, *self.battery_soc}
+
+
+def _origin_entities(source: dict, stat_rate: str) -> list[str]:
+    """The user's own sensors behind a source's resolved power entity."""
+    config = source.get("power_config") or {}
+    own = [
+        config.get(key)
+        for key in ("stat_rate_inverted", "stat_rate_from", "stat_rate_to")
+        if config.get(key) and valid_entity_id(config[key])
+    ]
+    return [entity for entity in own if entity != stat_rate]
 
 
 def _power_entity(source: dict) -> str | None:
@@ -88,19 +104,18 @@ async def async_resolve_roles(hass: HomeAssistant) -> EnergyRoles:
 
     for source in manager.data.get("energy_sources", []):
         source_type = source.get("type")
-        if source_type == "solar":
-            entity_id = _power_entity(source)
-            if entity_id:
-                roles.solar.append(entity_id)
-        elif source_type == "grid":
-            entity_id = _power_entity(source)
-            if entity_id:
-                roles.grid.append(entity_id)
-        elif source_type == "battery":
+        if source_type not in ("solar", "grid", "battery"):
+            continue
+        if source_type == "battery":
             roles.battery_configured = True
-            entity_id = _power_entity(source)
-            if entity_id:
-                roles.battery.append(entity_id)
+        entity_id = _power_entity(source)
+        if entity_id:
+            {"solar": roles.solar, "grid": roles.grid, "battery": roles.battery}[
+                source_type
+            ].append(entity_id)
+            if origin := _origin_entities(source, entity_id):
+                roles.origins[entity_id] = origin
+        if source_type == "battery":
             stat_soc = source.get("stat_soc")
             if stat_soc and valid_entity_id(stat_soc):
                 roles.battery_soc.append(stat_soc)

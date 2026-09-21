@@ -191,3 +191,37 @@ async def test_raw_power_config_without_resolved_stat_rate_is_unmapped(hass):
     ):
         roles = await async_resolve_roles(hass)
     assert roles.grid == []
+
+
+async def test_origins_record_the_users_own_sensors_behind_a_generated_one(hass):
+    with patch(
+        "custom_components.sunplug.energy_map.async_get_manager",
+        return_value=type(
+            "M",
+            (),
+            {
+                "data": {
+                    "energy_sources": [
+                        {"type": "solar", "stat_energy_from": "sensor.pv",
+                         "stat_rate": "sensor.pv_power"},
+                        {
+                            "type": "battery",
+                            "stat_energy_from": None,
+                            "stat_energy_to": None,
+                            "stat_rate": "sensor.energy_battery_d_c_net_power",
+                            "power_config": {
+                                "stat_rate_from": "sensor.d",
+                                "stat_rate_to": "sensor.c",
+                            },
+                        },
+                    ],
+                    "device_consumption": [],
+                }
+            },
+        )(),
+    ):
+        roles = await async_resolve_roles(hass)
+    assert roles.origins == {
+        "sensor.energy_battery_d_c_net_power": ["sensor.d", "sensor.c"]
+    }
+    assert "sensor.pv_power" not in roles.origins

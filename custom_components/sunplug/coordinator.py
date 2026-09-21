@@ -143,7 +143,13 @@ class SunplugSender:
             if entity_id in tracked
         }
         for entity_id in tracked:
-            self._tracking.setdefault(entity_id, _EntityTracking())
+            track = self._tracking.setdefault(entity_id, _EntityTracking())
+            # Seeded from the state machine, so a restart does not wait for
+            # every sensor to report again before the first reading goes out.
+            if track.last_reported is None and (
+                state := self.hass.states.get(entity_id)
+            ):
+                track.last_reported = state.last_reported
 
         if not tracked:
             return
@@ -242,9 +248,7 @@ class SunplugSender:
             if entity_id in self._slow_issue_active:
                 return
             self._slow_issue_active.add(entity_id)
-            registry = er.async_get(self.hass)
-            reg_entry = registry.async_get(entity_id)
-            integration = reg_entry.platform if reg_entry else "unknown"
+            integration = self._integration_of(entity_id) or "unknown"
             placeholders = {
                 "entity_id": entity_id,
                 "integration": integration,
@@ -272,31 +276,34 @@ class SunplugSender:
     def _role_kw(
         self, role_entities: list[str], now: datetime
     ) -> tuple[float | None, datetime | None]:
-        """Sum a role's power entities in kW. Returns (value, newest_ts)."""
+        """Sum a role's power entities in kW. Returns (value, newest_ts).
+
+        Unknown unless every entity of the role is known and fresh: a sum
+        missing one of two grid connections is a plausible, wrong number, and
+        Sunplug cannot tell it from a real one. Unknown it can handle.
+        """
         total = 0.0
         newest: datetime | None = None
-        any_known = False
+        if not role_entities:
+            return None, None
         for entity_id in role_entities:
             if self._is_stale(entity_id, now):
-                continue
+                return None, None
             state = self.hass.states.get(entity_id)
             if state is None or state.state in (None, "unknown", "unavailable"):
-                continue
+                return None, None
             try:
                 value = float(state.state)
             except (TypeError, ValueError):
-                continue
+                return None, None
             unit = state.attributes.get("unit_of_measurement", UnitOfPower.WATT)
             try:
                 kw = PowerConverter.convert(value, unit, UnitOfPower.KILO_WATT)
             except HomeAssistantError:
-                continue
+                return None, None
             total += kw
-            any_known = True
             if newest is None or state.last_reported > newest:
                 newest = state.last_reported
-        if not any_known:
-            return None, None
         return total, newest
 
     def _soc_fraction(
@@ -321,19 +328,23 @@ class SunplugSender:
             return None, None
         return statistics.mean(values) / 100, newest
 
-    def _integrations_for(self, role: str) -> str | None:
-        entities = self.roles.entities_for(role)
-        if not entities:
-            return None
+    def _integration_of(self, entity_id: str) -> str | None:
+        """The integration owning a power entity, looking through HA's own
+        generated sensors to the user's sensors behind them."""
         registry = er.async_get(self.hass)
-        domains: set[str] = set()
-        for entity_id in entities:
-            reg_entry = registry.async_get(entity_id)
+        domains = set()
+        for own in self.roles.origins.get(entity_id) or [entity_id]:
+            reg_entry = registry.async_get(own)
             if reg_entry and reg_entry.platform:
                 domains.add(reg_entry.platform)
-        if not domains:
-            return None
-        return ",".join(sorted(domains))
+        return ",".join(sorted(domains)) or None
+
+    def _integrations_for(self, role: str) -> str | None:
+        domains: set[str] = set()
+        for entity_id in self.roles.entities_for(role):
+            if found := self._integration_of(entity_id):
+                domains.update(found.split(","))
+        return ",".join(sorted(domains)) or None
 
     def _build_payload(self) -> dict[str, Any] | None:
         now = dt_util.utcnow()

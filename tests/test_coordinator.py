@@ -516,3 +516,76 @@ async def test_cadence_interval_s_rises_for_slow_sensor(hass, aioclient_mock, fr
 
     if sender._pending_send_unsub is not None:
         sender._pending_send_unsub()
+
+
+# -- review fixes (lead) --------------------------------------------------------
+
+
+async def test_a_role_missing_one_of_its_sensors_is_unknown(hass):
+    """Two grid connections, one unavailable: half a grid reading is a
+    plausible wrong number, so the reading is skipped instead."""
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(
+        solar=["sensor.solar_power"],
+        grid=["sensor.grid_a_power", "sensor.grid_b_power"],
+    )
+    now = dt_util.utcnow()
+    sender._tracking = {
+        entity: _EntityTracking(last_reported=now)
+        for entity in ("sensor.solar_power", "sensor.grid_a_power", "sensor.grid_b_power")
+    }
+    set_power_state(hass, "sensor.solar_power", 1000)
+    set_power_state(hass, "sensor.grid_a_power", 400)
+    set_power_state(hass, "sensor.grid_b_power", "unavailable")
+    assert sender._build_payload() is None
+
+    set_power_state(hass, "sensor.grid_b_power", 100)
+    assert sender._build_payload()["net_import_kw"] == 0.5
+
+
+async def test_a_generated_power_sensor_names_the_integration_behind_it(hass):
+    """An inverted or two-sensor config is read through HA's own generated
+    sensor; the integration reported is the user's, not `energy`."""
+    sender = _make_sender(hass)
+    generated = "sensor.grid_raw_power_inverted"
+    sender.roles = EnergyRoles(
+        solar=["sensor.solar_power"],
+        grid=[generated],
+        origins={generated: ["sensor.grid_raw_power"]},
+    )
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        generated: _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", 100, platform="enphase_envoy")
+    set_power_state(hass, generated, -300, platform="energy")
+    set_power_state(hass, "sensor.grid_raw_power", 300, platform="solaredge_modbus_multi")
+    payload = sender._build_payload()
+    assert payload["ha_integrations"] == {
+        "solar": "enphase_envoy",
+        "grid": "solaredge_modbus_multi",
+    }
+
+
+async def test_a_restart_does_not_wait_for_every_sensor_to_report_again(hass):
+    """Roles resolved while states already exist start from their last report."""
+    from .helpers import async_set_energy_prefs
+
+    set_power_state(hass, "sensor.solar_power", 1500)
+    set_power_state(hass, "sensor.grid_power", -700)
+    await async_set_energy_prefs(
+        hass,
+        [
+            {"type": "solar", "stat_energy_from": "sensor.solar_energy",
+             "stat_rate": "sensor.solar_power"},
+            {"type": "grid", "stat_energy_from": None, "stat_energy_to": None,
+             "stat_rate": "sensor.grid_power", "cost_adjustment_day": 0.0},
+        ],
+    )
+    sender = _make_sender(hass)
+    await sender._async_reload_roles()
+    payload = sender._build_payload()
+    assert payload is not None
+    assert payload["production_kw"] == 1.5
+    assert payload["net_import_kw"] == -0.7
