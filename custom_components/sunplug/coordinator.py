@@ -101,6 +101,14 @@ class SunplugSender:
         self._logged_422 = False
         self.last_post = LastPostStatus()
         self._slow_issue_active: set[str] = set()
+        # Failure counts since the last successful post (see const.STAT_REASONS),
+        # sent to Sunplug as "ha_stats" and reset only once a post carrying
+        # them gets a 200.
+        self._stats: dict[str, int] = {}
+        # log-when-unavailable once/back state: warn on the first failure,
+        # info once when it clears, silent while the condition persists.
+        self._reading_unavailable = False
+        self._post_failing = False
 
     # -- setup / teardown -------------------------------------------------
 
@@ -281,36 +289,41 @@ class SunplugSender:
 
     def _role_kw(
         self, role_entities: list[str], now: datetime
-    ) -> tuple[float | None, datetime | None]:
-        """Sum a role's power entities in kW. Returns (value, newest_ts).
+    ) -> tuple[float | None, datetime | None, str | None]:
+        """Sum a role's power entities in kW. Returns (value, newest_ts, reason).
 
         Unknown unless every entity of the role is known and fresh: a sum
         missing one of two grid connections is a plausible, wrong number, and
         Sunplug cannot tell it from a real one. Unknown it can handle.
+
+        reason is None on success, otherwise "stale" (the entity's own
+        `_is_stale` check tripped) or "unknown" (unavailable, unknown,
+        non-numeric, or missing) — the caller maps that to a specific
+        const.STAT_REASONS entry, since only it knows which role this is.
         """
         total = 0.0
         newest: datetime | None = None
         if not role_entities:
-            return None, None
+            return None, None, "unknown"
         for entity_id in role_entities:
             if self._is_stale(entity_id, now):
-                return None, None
+                return None, None, "stale"
             state = self.hass.states.get(entity_id)
             if state is None or state.state in (None, "unknown", "unavailable"):
-                return None, None
+                return None, None, "unknown"
             try:
                 value = float(state.state)
             except (TypeError, ValueError):
-                return None, None
+                return None, None, "unknown"
             unit = state.attributes.get("unit_of_measurement", UnitOfPower.WATT)
             try:
                 kw = PowerConverter.convert(value, unit, UnitOfPower.KILO_WATT)
             except HomeAssistantError:
-                return None, None
+                return None, None, "unknown"
             total += kw
             if newest is None or state.last_reported > newest:
                 newest = state.last_reported
-        return total, newest
+        return total, newest, None
 
     def _soc_fraction(
         self, entities: list[str], now: datetime
@@ -352,17 +365,45 @@ class SunplugSender:
                 domains.update(found.split(","))
         return ",".join(sorted(domains)) or None
 
+    def _async_record_reading_skip(self, role: str, reason: str | None) -> None:
+        """Count a skipped reading (const.STAT_REASONS) and log it.
+
+        Debug logs every skip; the log-when-unavailable warning fires only on
+        the transition into "no reading possible", never while it persists.
+        """
+        if reason == "stale":
+            stat = "sensor_stale"
+        elif role == ROLE_SOLAR:
+            stat = "solar_unknown"
+        else:
+            stat = "grid_unknown"
+        self._stats[stat] = self._stats.get(stat, 0) + 1
+        _LOGGER.debug("Sunplug reading skipped: role=%s reason=%s", role, stat)
+        if not self._reading_unavailable:
+            self._reading_unavailable = True
+            _LOGGER.warning("Sunplug: no reading possible (%s)", stat)
+
+    def _async_reading_available(self) -> None:
+        """Clear the "no reading possible" state, logging once if it was set."""
+        if self._reading_unavailable:
+            self._reading_unavailable = False
+            _LOGGER.info("Sunplug: readings resumed")
+
     def _build_payload(self) -> dict[str, Any] | None:
         now = dt_util.utcnow()
 
-        solar_kw, solar_ts = self._role_kw(self.roles.solar, now)
+        solar_kw, solar_ts, solar_reason = self._role_kw(self.roles.solar, now)
         if solar_kw is None:
+            self._async_record_reading_skip(ROLE_SOLAR, solar_reason)
             return None
         solar_kw = max(0.0, solar_kw)
 
-        grid_kw, grid_ts = self._role_kw(self.roles.grid, now)
+        grid_kw, grid_ts, grid_reason = self._role_kw(self.roles.grid, now)
         if grid_kw is None:
+            self._async_record_reading_skip(ROLE_GRID, grid_reason)
             return None
+
+        self._async_reading_available()
 
         timestamps = [ts for ts in (solar_ts, grid_ts) if ts is not None]
 
@@ -376,7 +417,7 @@ class SunplugSender:
         if not self.roles.battery_configured:
             payload["battery_discharge_kw"] = None
         else:
-            battery_kw, battery_ts = self._role_kw(self.roles.battery, now)
+            battery_kw, battery_ts, _reason = self._role_kw(self.roles.battery, now)
             if battery_kw is not None:
                 payload["battery_discharge_kw"] = round(battery_kw, 3)
                 if battery_ts is not None:
@@ -403,9 +444,20 @@ class SunplugSender:
         payload["tsms"] = int(max(timestamps).timestamp() * 1000)
         payload["ingest_url"] = self.entry.data[CONF_INGEST_URL]
 
+        if self._stats:
+            payload["ha_stats"] = dict(self._stats)
+
         return payload
 
     # -- sending ------------------------------------------------------------
+
+    @staticmethod
+    def _roles_in_payload(payload: dict[str, Any]) -> list[str]:
+        """Which Energy roles carried a real value in this payload."""
+        roles = [ROLE_SOLAR, ROLE_GRID]
+        if isinstance(payload.get("battery_discharge_kw"), (int, float)):
+            roles.append(ROLE_BATTERY)
+        return roles
 
     async def _async_send(self) -> None:
         if not self._dirty:
@@ -424,15 +476,38 @@ class SunplugSender:
         token = self.entry.data[CONF_TOKEN]
 
         result = await async_post_reading(session, ingest_url, token, payload)
-        await self._async_handle_result(result)
+        _LOGGER.debug(
+            "Sunplug post: status=%s interval_s=%s roles=%s",
+            result.status,
+            payload["interval_s"],
+            ",".join(self._roles_in_payload(payload)),
+        )
+        await self._async_handle_result(result, payload.get("ha_stats", {}))
 
-    async def _async_handle_result(self, result: PostResult) -> None:
+    async def _async_handle_result(
+        self, result: PostResult, sent_stats: dict[str, int] | None = None
+    ) -> None:
         now = dt_util.utcnow()
 
         if result.status == 200:
             self._dirty = False
             self.last_post = LastPostStatus(at=now, status="ok")
             self._logged_422 = False
+            # Only a 200 clears counts, and only the ones this post carried:
+            # anything counted while it was in flight waits for the next one.
+            # A failed post keeps adding.
+            if sent_stats is None:
+                self._stats = {}
+            else:
+                for reason, count in sent_stats.items():
+                    left = self._stats.get(reason, 0) - count
+                    if left > 0:
+                        self._stats[reason] = left
+                    else:
+                        self._stats.pop(reason, None)
+            if self._post_failing:
+                self._post_failing = False
+                _LOGGER.info("Sunplug: posting readings resumed")
             if result.new_ingest_url:
                 self._async_maybe_adopt_ingest_url(result.new_ingest_url)
             return
@@ -457,16 +532,28 @@ class SunplugSender:
             return
 
         if result.status == 429:
+            self._async_record_post_failure("post_rate_limited")
             self.last_post = LastPostStatus(at=now, status="rate_limited")
             # Cadence slot already consumed in _async_send; nothing else to do.
             return
 
         # Network error or 5xx: keep the reading pending for the next trigger.
+        if result.status is None:
+            self._async_record_post_failure("post_network")
+        elif 500 <= result.status < 600:
+            self._async_record_post_failure("post_server")
         self.last_post = LastPostStatus(
             at=now,
             status="error",
             error_class=result.exception or f"http_{result.status}",
         )
+
+    def _async_record_post_failure(self, stat: str) -> None:
+        """Count a failed post (const.STAT_REASONS) and log-when-unavailable."""
+        self._stats[stat] = self._stats.get(stat, 0) + 1
+        if not self._post_failing:
+            self._post_failing = True
+            _LOGGER.warning("Sunplug: posting readings is failing (%s)", stat)
 
     @callback
     def _async_maybe_adopt_ingest_url(self, new_url: str) -> None:
@@ -508,4 +595,7 @@ class SunplugSender:
                 "status": self.last_post.status,
                 "error_class": self.last_post.error_class,
             },
+            "ha_stats": dict(self._stats),
+            "reading_unavailable": self._reading_unavailable,
+            "post_failing": self._post_failing,
         }

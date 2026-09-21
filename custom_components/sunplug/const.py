@@ -34,6 +34,19 @@ REQUIRED_ROLES: Final = (ROLE_SOLAR, ROLE_GRID)
 # --- Repairs ---
 ISSUE_SLOW_ENTITY: Final = "slow_entity"
 
+# --- Failure vocabulary reported to Sunplug (ha_stats) ---
+# Fixed set of reasons a reading was skipped, or a post failed, counted since
+# the last successful post. Order is not meaningful; only non-zero counts are
+# ever sent.
+STAT_REASONS: Final = (
+    "solar_unknown",
+    "grid_unknown",
+    "sensor_stale",
+    "post_network",
+    "post_server",
+    "post_rate_limited",
+)
+
 # Known cloud-polling integrations that have a faster local alternative.
 # Mapping of integration domain -> local alternative name shown in the repair.
 # Integrations not listed here (or intentionally omitted, e.g. tibber without a

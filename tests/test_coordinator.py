@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -618,3 +619,254 @@ async def test_setup_sends_the_current_states_without_waiting_for_a_change(
     assert body["production_kw"] == 3.2
     assert body["net_import_kw"] == -1.8
     await sender.async_unload()
+
+
+# -- observability: ha_stats, log-when-unavailable, debug logging -------------
+
+_LOGGER_NAME = "custom_components.sunplug.coordinator"
+
+
+async def test_skip_counts_solar_unknown(hass):
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    hass.states.async_set("sensor.solar_power", "unavailable")
+    set_power_state(hass, "sensor.grid_power", 100)
+    assert sender._build_payload() is None
+    assert sender._stats == {"solar_unknown": 1}
+
+
+async def test_skip_counts_grid_unknown(hass):
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", 100)
+    hass.states.async_set("sensor.grid_power", "unknown")
+    assert sender._build_payload() is None
+    assert sender._stats == {"grid_unknown": 1}
+
+
+async def test_skip_counts_sensor_stale_distinct_from_unknown(hass):
+    """A stale required entity counts as sensor_stale, not solar_unknown."""
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now - timedelta(minutes=20)),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", 100)
+    set_power_state(hass, "sensor.grid_power", 100)
+    assert sender._build_payload() is None
+    assert sender._stats == {"sensor_stale": 1}
+
+
+async def test_skip_counts_accumulate_across_calls(hass):
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    hass.states.async_set("sensor.solar_power", "unavailable")
+    set_power_state(hass, "sensor.grid_power", 100)
+    sender._build_payload()
+    sender._build_payload()
+    assert sender._stats == {"solar_unknown": 2}
+
+
+async def test_skip_logs_debug_with_reason(hass, caplog):
+    caplog.set_level(logging.DEBUG, logger=_LOGGER_NAME)
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    hass.states.async_set("sensor.solar_power", "unavailable")
+    set_power_state(hass, "sensor.grid_power", 100)
+    sender._build_payload()
+    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert any("solar_unknown" in r.getMessage() for r in debug_records)
+
+
+async def test_payload_omits_ha_stats_when_empty(hass):
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", 100)
+    set_power_state(hass, "sensor.grid_power", 100)
+    payload = sender._build_payload()
+    assert "ha_stats" not in payload
+
+
+async def test_stats_sent_with_next_successful_post_and_reset_after_200(
+    hass, aioclient_mock, freezer
+):
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+
+    # A skipped reading (solar unknown) builds up a pending count, nothing sent.
+    hass.states.async_set("sensor.solar_power", "unavailable")
+    set_power_state(hass, "sensor.grid_power", 100)
+    sender._dirty = True
+    await sender._async_send()
+    assert sender._stats == {"solar_unknown": 1}
+    assert len(aioclient_mock.mock_calls) == 0
+
+    # Solar becomes known again; the next successful post carries the count.
+    aioclient_mock.post(MOCK_INGEST_URL, json={"ok": True}, status=200)
+    set_power_state(hass, "sensor.solar_power", 500)
+    sender._dirty = True
+    await sender._async_send()
+    assert len(aioclient_mock.mock_calls) == 1
+    body = aioclient_mock.mock_calls[0][2]
+    assert body["ha_stats"] == {"solar_unknown": 1}
+    assert sender._stats == {}
+
+
+async def test_stats_kept_after_5xx(hass, aioclient_mock, freezer):
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", 500)
+    set_power_state(hass, "sensor.grid_power", 100)
+    sender._stats = {"grid_unknown": 2}
+    aioclient_mock.post(MOCK_INGEST_URL, status=503)
+    sender._dirty = True
+    await sender._async_send()
+    assert sender._stats == {"grid_unknown": 2, "post_server": 1}
+
+
+async def test_post_429_counted(hass):
+    sender = _make_sender(hass)
+    await sender._async_handle_result(PostResult(status=429))
+    assert sender._stats == {"post_rate_limited": 1}
+
+
+async def test_post_network_error_counted(hass):
+    sender = _make_sender(hass)
+    await sender._async_handle_result(PostResult(status=None, exception="ClientError"))
+    assert sender._stats == {"post_network": 1}
+
+
+async def test_post_5xx_counted(hass):
+    sender = _make_sender(hass)
+    await sender._async_handle_result(PostResult(status=500))
+    assert sender._stats == {"post_server": 1}
+
+
+async def test_post_401_and_422_not_counted(hass):
+    sender = _make_sender(hass)
+    with patch.object(sender.entry, "async_start_reauth"):
+        await sender._async_handle_result(PostResult(status=401))
+    await sender._async_handle_result(PostResult(status=422, error_body="x"))
+    assert sender._stats == {}
+
+
+async def test_post_failing_once_back_logging(hass, caplog):
+    caplog.set_level(logging.INFO, logger=_LOGGER_NAME)
+    sender = _make_sender(hass)
+    await sender._async_handle_result(PostResult(status=500))
+    await sender._async_handle_result(PostResult(status=500))
+    await sender._async_handle_result(PostResult(status=429))
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+
+    await sender._async_handle_result(PostResult(status=200, ok=True))
+    infos = [r for r in caplog.records if r.levelname == "INFO"]
+    assert len(infos) == 1
+
+    # A further failure after recovery warns again (not suppressed forever).
+    await sender._async_handle_result(PostResult(status=500))
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2
+
+
+async def test_reading_unavailable_once_back_logging(hass, caplog):
+    caplog.set_level(logging.INFO, logger=_LOGGER_NAME)
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    hass.states.async_set("sensor.solar_power", "unavailable")
+    set_power_state(hass, "sensor.grid_power", 100)
+
+    sender._build_payload()
+    sender._build_payload()
+    sender._build_payload()
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+
+    set_power_state(hass, "sensor.solar_power", 500)
+    sender._build_payload()
+    infos = [r for r in caplog.records if r.levelname == "INFO"]
+    assert len(infos) == 1
+
+
+async def test_debug_line_on_post(hass, aioclient_mock, caplog):
+    caplog.set_level(logging.DEBUG, logger=_LOGGER_NAME)
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", 500)
+    set_power_state(hass, "sensor.grid_power", 100)
+    aioclient_mock.post(MOCK_INGEST_URL, json={"ok": True}, status=200)
+    sender._dirty = True
+    await sender._async_send()
+    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert any(
+        "status=200" in r.getMessage() and "roles=solar,grid" in r.getMessage()
+        for r in debug_records
+    )
+
+
+async def test_diagnostics_includes_stats_and_unavailable_state(hass):
+    sender = _make_sender(hass)
+    sender._stats = {"post_network": 2}
+    sender._reading_unavailable = True
+    sender._post_failing = True
+    data = sender.diagnostics_data()
+    assert data["ha_stats"] == {"post_network": 2}
+    assert data["reading_unavailable"] is True
+    assert data["post_failing"] is True
+
+
+async def test_counts_added_while_a_post_is_in_flight_survive_its_200(hass):
+    """Only what a post carried is cleared by its 200."""
+    sender = _make_sender(hass)
+    sender._stats = {"grid_unknown": 3, "post_server": 1}
+    carried = dict(sender._stats)
+    sender._stats["grid_unknown"] += 2  # counted while the post was in flight
+    await sender._async_handle_result(PostResult(status=200), carried)
+    assert sender._stats == {"grid_unknown": 2}
