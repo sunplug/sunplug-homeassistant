@@ -1,27 +1,39 @@
 # Sunplug for Home Assistant
 
-Sends your home's live solar, grid and battery power to
-[Sunplug](https://sunplug.app) so it can plan charging around your own
+**Beta.** Reads the power sensors you've already configured on Home
+Assistant's [Energy dashboard](https://my.home-assistant.io/redirect/energy/)
+and sends your solar, grid and battery power — plus battery charge — to
+[Sunplug](https://sunplug.app), so it can plan charging around your own
 production.
+
+There is no entity picker. This integration follows whatever sensors are set
+under **Settings → Dashboards → Energy**; change them there and Sunplug
+follows automatically.
 
 ## Requirements
 
-- A Home Assistant **Energy dashboard** already set up, with at least:
-  - one **solar production** power (or energy) sensor, and
-  - one **grid** power (or energy) sensor.
-- A Sunplug account and a pairing code from the Sunplug app.
+- Home Assistant 2026.3 or later.
+- An Energy dashboard already configured with:
+  - a **solar production** power sensor, and
+  - a **grid** power sensor.
 
-This integration does not ask you to pick entities. It reads whatever you
-have already configured on the Energy dashboard (`/config/energy`) and uses
-those same sensors. If you add, remove or change sensors there later, Sunplug
-picks up the change automatically.
+  These must be **power** sensors (W/kW), not energy-only (kWh) sensors —
+  Home Assistant lets you configure either, but Sunplug needs live power
+  readings.
+- A Sunplug account and a pairing code (in the Sunplug app: **Equipment →
+  Home Assistant**).
+
+A battery power sensor and a battery charge (state of charge) sensor on the
+Energy dashboard are optional; battery power is sent as `null` if you don't
+have one configured.
 
 ## Install
 
-### Via HACS (custom repository)
+### HACS (custom repository)
 
-1. In HACS, open the menu and choose **Custom repositories**.
-2. Add `https://github.com/sunplug/sunplug-homeassistant` as an **Integration**.
+1. In HACS, open the menu → **Custom repositories**.
+2. Add `https://github.com/sunplug/sunplug-homeassistant`, category
+   **Integration**.
 3. Install **Sunplug**, then restart Home Assistant.
 
 ### Manual
@@ -31,18 +43,66 @@ directory and restart Home Assistant.
 
 ## Pairing
 
-1. In Home Assistant, go to **Settings → Devices & services → Add integration**
-   and search for **Sunplug**.
-2. Open the Sunplug app, generate a pairing code, and enter it in Home
-   Assistant.
+1. Make sure your Energy dashboard has a solar and a grid power sensor
+   (`/config/energy`) — the integration refuses to start otherwise.
+2. In Home Assistant: **Settings → Devices & services → Add integration**,
+   search for **Sunplug**.
+3. In the Sunplug app, go to **Equipment → Home Assistant** to get a pairing
+   code, and enter it in Home Assistant.
 
-If your Energy dashboard is not yet configured with a solar and a grid power
-sensor, set that up first at `/config/energy` — Sunplug needs it to know
-which sensors to read.
+## What is sent
 
-## What it sends
+Every reading contains:
 
-Sunplug periodically sends your current solar production, grid import/export
-and (if you have one configured) battery power and state of charge. Nothing
-is sent faster than every 30 seconds, and only when your sensors have
-actually reported new data.
+- a timestamp,
+- solar power, in kW,
+- grid power, in kW (positive = importing from the grid),
+- battery power, in kW (positive = discharging), or `null` if no battery
+  source is configured on the Energy dashboard,
+- battery charge, as a fraction of full,
+- how often readings are sent, and
+- which Home Assistant integration provides each value — the integration's
+  name only (e.g. `shelly`, `enphase_envoy`), never an entity ID, friendly
+  name, or address.
+
+Nothing else leaves your instance. A reading is sent whenever a mapped sensor
+reports a new value, and never more often than every 30 seconds; nothing is
+sent while nothing has changed.
+
+## Freshness
+
+Some cloud-polling integrations update slowly — SolarEdge's cloud API roughly
+every 15 minutes, Growatt's cloud roughly every 5. Sunplug's usefulness
+depends on how current your readings are, so if your solar or grid sensor
+updates less often than every 5 minutes, Home Assistant raises a repair
+notice. Where a faster local alternative is known, the notice names it (e.g.
+SolarEdge Modbus Multi via HACS, in place of the SolarEdge cloud integration).
+
+See [sunplug.app/kb/home-assistant](https://sunplug.app/kb/home-assistant)
+for the full guide, including sensor requirements per inverter brand.
+
+## Troubleshooting
+
+**Grid values look backwards** (import/export flipped): fix the sign in the
+Energy dashboard's grid sensor settings — Home Assistant offers an "inverted"
+option for exactly this.
+
+**A role (solar/grid/battery) is missing from a reading**: it's skipped
+whenever any of its sensors is unavailable or stale, rather than sending a
+partial or guessed value.
+
+**Home Assistant asks you to reconnect**: your Sunplug pairing was revoked or
+expired. A re-authentication prompt appears on the integration; enter a new
+pairing code from the Sunplug app.
+
+**Diagnostics**: **Settings → Devices & services → Sunplug → ⋮ → Download
+diagnostics**. The pairing token is redacted.
+
+## Support
+
+- Email: support@sunplug.app
+- Issues: [GitHub](https://github.com/sunplug/sunplug-homeassistant/issues)
+
+## License
+
+Apache-2.0

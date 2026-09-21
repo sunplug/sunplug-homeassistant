@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -14,6 +16,46 @@ from .const import API_BASE, CLAIM_PATH
 _LOGGER = logging.getLogger(__name__)
 
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+# Staging override for end-to-end testing only. Not exposed in any UI or
+# strings; a normal user never sets this. Valid values are an https:// URL,
+# or http:// against localhost/127.0.0.1/host.docker.internal (e.g. a
+# containerized staging backend reached without TLS).
+_ENV_API_BASE = "SUNPLUG_API_BASE"
+_LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "host.docker.internal"}
+
+_override_warned = False
+
+
+def _is_allowed_override(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme == "https" and parsed.netloc:
+        return True
+    if parsed.scheme == "http" and parsed.hostname in _LOCAL_HTTP_HOSTS:
+        return True
+    return False
+
+
+def _resolve_api_base() -> str:
+    """Return the API base to use, honoring SUNPLUG_API_BASE if valid.
+
+    Read fresh on every call (i.e. at config-flow time) rather than cached at
+    import time, so the override can be set for a single test run.
+    """
+    global _override_warned
+    override = os.environ.get(_ENV_API_BASE)
+    if not override:
+        return API_BASE
+    if not _is_allowed_override(override):
+        return API_BASE
+    if not _override_warned:
+        _override_warned = True
+        _LOGGER.warning(
+            "Sunplug API base overridden by %s=%s (staging use only)",
+            _ENV_API_BASE,
+            override,
+        )
+    return override
 
 
 class SunplugApiError(Exception):
@@ -40,9 +82,10 @@ async def async_claim(
     session: aiohttp.ClientSession, code: str, name: str = "Home Assistant"
 ) -> ClaimResult:
     """Claim a pairing code and obtain a token + ingest URL."""
+    api_base = _resolve_api_base()
     try:
         response = await session.post(
-            f"{API_BASE}{CLAIM_PATH}",
+            f"{api_base}{CLAIM_PATH}",
             json={"code": code, "name": name, "client": "homeassistant"},
             timeout=_TIMEOUT,
         )
