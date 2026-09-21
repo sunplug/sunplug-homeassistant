@@ -44,7 +44,7 @@ directory and restart Home Assistant.
 ## Pairing
 
 1. Make sure your Energy dashboard has a solar and a grid power sensor
-   (`/config/energy`) — the integration refuses to start otherwise.
+   (`/config/energy`). Setup stops and points you there otherwise.
 2. In Home Assistant: **Settings → Devices & services → Add integration**,
    search for **Sunplug**.
 3. In the Sunplug app, go to **Equipment → Home Assistant** to get a pairing
@@ -74,12 +74,12 @@ sent while nothing has changed.
 Some cloud-polling integrations update slowly — SolarEdge's cloud API roughly
 every 15 minutes, Growatt's cloud roughly every 5. Sunplug's usefulness
 depends on how current your readings are, so if your solar or grid sensor
-updates less often than every 5 minutes, Home Assistant raises a repair
-notice. Where a faster local alternative is known, the notice names it (e.g.
+updates less often than every 5 minutes, the integration raises a repair
+notice in Home Assistant. Where a faster local alternative is known, the notice names it (e.g.
 SolarEdge Modbus Multi via HACS, in place of the SolarEdge cloud integration).
 
 See [sunplug.app/kb/home-assistant](https://sunplug.app/kb/home-assistant)
-for the full guide, including sensor requirements per inverter brand.
+for the full guide.
 
 ## Troubleshooting
 
@@ -87,9 +87,10 @@ for the full guide, including sensor requirements per inverter brand.
 Energy dashboard's grid sensor settings — Home Assistant offers an "inverted"
 option for exactly this.
 
-**A role (solar/grid/battery) is missing from a reading**: it's skipped
-whenever any of its sensors is unavailable or stale, rather than sending a
-partial or guessed value.
+**Readings stop, or the battery is missing from them**: a value counts only
+when every sensor behind it is available and fresh. Without solar or grid,
+no reading is sent at all; without battery, the reading goes out without it.
+Nothing partial or guessed is ever sent.
 
 **Home Assistant asks you to reconnect**: your Sunplug pairing was revoked or
 expired. A re-authentication prompt appears on the integration; enter a new
