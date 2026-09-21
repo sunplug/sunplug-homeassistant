@@ -1,13 +1,17 @@
 {
   "domain": "sunplug",
   "name": "Sunplug",
+  "codeowners": [
+    "@sunplug/home-assistant"
+  ],
   "config_flow": true,
-  "iot_class": "cloud_push",
-  "integration_type": "service",
-  "dependencies": ["energy"],
+  "dependencies": [
+    "energy"
+  ],
   "documentation": "https://sunplug.app/kb/home-assistant",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/sunplug/sunplug-homeassistant/issues",
-  "codeowners": ["@sunplug/home-assistant"],
-  "version": "0.1.0",
-  "requirements": []
+  "requirements": [],
+  "version": "0.1.0"
 }
