@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Appairage avec Sunplug",
+        "description": "Saisissez le code d'appairage à 6 caractères affiché dans l'application Sunplug.",
+        "data": {
+          "pairing_code": "Code d'appairage"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reconnexion à Sunplug",
+        "description": "Votre appairage Sunplug a expiré. Saisissez un nouveau code d'appairage depuis l'application Sunplug.",
+        "data": {
+          "pairing_code": "Code d'appairage"
+        }
+      }
+    },
+    "error": {
+      "invalid_code": "Ce code d'appairage n'a pas été accepté. Vérifiez le code et réessayez.",
+      "cannot_connect": "Impossible de joindre Sunplug. Vérifiez votre connexion internet et réessayez."
+    },
+    "abort": {
+      "no_power_sensors": "Configurez d'abord votre tableau de bord Énergie dans Home Assistant, avec au moins un capteur de puissance de production solaire et un capteur de puissance réseau. Rendez-vous sur {energy_url} pour le configurer.",
+      "already_configured": "Cette instance Home Assistant est déjà connectée à Sunplug.",
+      "reauth_successful": "Reconnexion à Sunplug réussie."
+    }
+  },
+  "issues": {
+    "slow_entity": {
+      "title": "Sunplug reçoit des mises à jour lentes de {entity_id}",
+      "description": "Le capteur {entity_id} de l'intégration {integration} se met à jour moins souvent que toutes les 5 minutes. Les relevés Sunplug de votre logement seront retardés en conséquence. Si ce capteur provient d'une intégration en cloud, une alternative locale pourrait se mettre à jour plus rapidement."
+    },
+    "slow_entity_with_alternative": {
+      "title": "Sunplug reçoit des mises à jour lentes de {entity_id}",
+      "description": "Le capteur {entity_id} de l'intégration {integration} se met à jour moins souvent que toutes les 5 minutes. Les relevés Sunplug de votre logement seront retardés en conséquence. Envisagez de passer à {alternative}, qui peut se mettre à jour localement et plus rapidement."
+    }
+  }
+}

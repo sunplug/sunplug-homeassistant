@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Pair with Sunplug",
+        "description": "Enter the 6-character pairing code shown in the Sunplug app.",
+        "data": {
+          "pairing_code": "Pairing code"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reconnect to Sunplug",
+        "description": "Your Sunplug pairing has expired. Enter a new pairing code from the Sunplug app.",
+        "data": {
+          "pairing_code": "Pairing code"
+        }
+      }
+    },
+    "error": {
+      "invalid_code": "That pairing code was not accepted. Check the code and try again.",
+      "cannot_connect": "Could not reach Sunplug. Check your internet connection and try again."
+    },
+    "abort": {
+      "no_power_sensors": "Set up your Home Assistant Energy dashboard first, with at least one solar production power sensor and one grid power sensor. Go to {energy_url} to configure it.",
+      "already_configured": "This Home Assistant instance is already connected to Sunplug.",
+      "reauth_successful": "Reconnected to Sunplug successfully."
+    }
+  },
+  "issues": {
+    "slow_entity": {
+      "title": "Sunplug is receiving slow updates from {entity_id}",
+      "description": "The {entity_id} sensor from the {integration} integration is updating slower than every 5 minutes. Sunplug readings for your home will be delayed accordingly. If this sensor comes from a cloud-polling integration, a local alternative may update faster."
+    },
+    "slow_entity_with_alternative": {
+      "title": "Sunplug is receiving slow updates from {entity_id}",
+      "description": "The {entity_id} sensor from the {integration} integration is updating slower than every 5 minutes. Sunplug readings for your home will be delayed accordingly. Consider switching to {alternative}, which can update locally and faster."
+    }
+  }
+}
