@@ -63,7 +63,9 @@ Every reading contains:
 - how often readings are sent, and
 - which Home Assistant integration provides each value — the integration's
   name only (e.g. `shelly`, `enphase_envoy`), never an entity ID, friendly
-  name, or address.
+  name, or address, and
+- counts of readings skipped or posts that failed since the last successful
+  one, by reason (e.g. a sensor unavailable) — no values, no names.
 
 Nothing else leaves your instance. A reading is sent whenever a mapped sensor
 reports a new value, and never more often than every 30 seconds; nothing is
