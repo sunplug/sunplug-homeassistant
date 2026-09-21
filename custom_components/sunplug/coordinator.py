@@ -482,18 +482,29 @@ class SunplugSender:
             payload["interval_s"],
             ",".join(self._roles_in_payload(payload)),
         )
-        await self._async_handle_result(result)
+        await self._async_handle_result(result, payload.get("ha_stats", {}))
 
-    async def _async_handle_result(self, result: PostResult) -> None:
+    async def _async_handle_result(
+        self, result: PostResult, sent_stats: dict[str, int] | None = None
+    ) -> None:
         now = dt_util.utcnow()
 
         if result.status == 200:
             self._dirty = False
             self.last_post = LastPostStatus(at=now, status="ok")
             self._logged_422 = False
-            # The counts were sent with this post; only a 200 for the post
-            # that carried them clears them. A failed post keeps adding.
-            self._stats = {}
+            # Only a 200 clears counts, and only the ones this post carried:
+            # anything counted while it was in flight waits for the next one.
+            # A failed post keeps adding.
+            if sent_stats is None:
+                self._stats = {}
+            else:
+                for reason, count in sent_stats.items():
+                    left = self._stats.get(reason, 0) - count
+                    if left > 0:
+                        self._stats[reason] = left
+                    else:
+                        self._stats.pop(reason, None)
             if self._post_failing:
                 self._post_failing = False
                 _LOGGER.info("Sunplug: posting readings resumed")

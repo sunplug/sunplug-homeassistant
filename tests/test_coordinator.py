@@ -860,3 +860,13 @@ async def test_diagnostics_includes_stats_and_unavailable_state(hass):
     assert data["ha_stats"] == {"post_network": 2}
     assert data["reading_unavailable"] is True
     assert data["post_failing"] is True
+
+
+async def test_counts_added_while_a_post_is_in_flight_survive_its_200(hass):
+    """Only what a post carried is cleared by its 200."""
+    sender = _make_sender(hass)
+    sender._stats = {"grid_unknown": 3, "post_server": 1}
+    carried = dict(sender._stats)
+    sender._stats["grid_unknown"] += 2  # counted while the post was in flight
+    await sender._async_handle_result(PostResult(status=200), carried)
+    assert sender._stats == {"grid_unknown": 2}
