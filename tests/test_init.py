@@ -9,10 +9,19 @@ from custom_components.sunplug.coordinator import SunplugSender
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from .helpers import async_set_energy_prefs, mock_config_entry_data, set_power_state
+from .helpers import (
+    MOCK_INGEST_URL,
+    async_set_energy_prefs,
+    mock_config_entry_data,
+    set_power_state,
+)
 
 
-async def test_setup_and_unload_entry(recorder_mock, hass, enable_custom_integrations):
+async def test_setup_and_unload_entry(
+    recorder_mock, hass, enable_custom_integrations, aioclient_mock
+):
+    # Setup posts the current states at once, so the endpoint is mocked.
+    aioclient_mock.post(MOCK_INGEST_URL, json={"ok": True}, status=200)
     await async_set_energy_prefs(
         hass,
         [

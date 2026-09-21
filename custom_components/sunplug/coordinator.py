@@ -113,6 +113,12 @@ class SunplugSender:
         manager = await async_get_manager(self.hass)
         manager.async_listen_updates(self._async_prefs_updated)
 
+        # The states already in Home Assistant are news to Sunplug: without
+        # this, quiet sensors (or a sensor that only reports on change) leave
+        # a freshly paired household with no reading until something moves.
+        self._dirty = True
+        self._async_maybe_send()
+
     async def async_unload(self) -> None:
         """Stop tracking. Best-effort: EnergyManager offers no listener removal."""
         self._unloaded = True

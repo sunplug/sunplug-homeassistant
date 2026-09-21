@@ -589,3 +589,32 @@ async def test_a_restart_does_not_wait_for_every_sensor_to_report_again(hass):
     assert payload is not None
     assert payload["production_kw"] == 1.5
     assert payload["net_import_kw"] == -0.7
+
+
+async def test_setup_sends_the_current_states_without_waiting_for_a_change(
+    hass, aioclient_mock, freezer
+):
+    """Paired while every sensor sits still: the first reading goes out anyway."""
+    from .helpers import async_set_energy_prefs
+
+    set_power_state(hass, "sensor.solar_power", 3200)
+    set_power_state(hass, "sensor.grid_power", -1800)
+    await async_set_energy_prefs(
+        hass,
+        [
+            {"type": "solar", "stat_energy_from": "sensor.solar_energy",
+             "stat_rate": "sensor.solar_power"},
+            {"type": "grid", "stat_energy_from": None, "stat_energy_to": None,
+             "stat_rate": "sensor.grid_power", "cost_adjustment_day": 0.0},
+        ],
+    )
+    aioclient_mock.post(MOCK_INGEST_URL, json={"ok": True}, status=200)
+    sender = _make_sender(hass)
+    await sender.async_setup()
+    async_fire_time_changed(hass, dt_util.utcnow(), fire_all=True)
+    await hass.async_block_till_done()
+    assert len(aioclient_mock.mock_calls) == 1
+    body = aioclient_mock.mock_calls[0][2]
+    assert body["production_kw"] == 3.2
+    assert body["net_import_kw"] == -1.8
+    await sender.async_unload()
