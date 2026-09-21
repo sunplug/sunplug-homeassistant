@@ -55,6 +55,8 @@ async def test_full_flow_success(recorder_mock, hass, enable_custom_integrations
         json={"token": MOCK_TOKEN, "ingest_url": MOCK_INGEST_URL},
         status=200,
     )
+    # A set-up entry posts its first reading at once.
+    aioclient_mock.post(MOCK_INGEST_URL, json={"ok": True}, status=200)
 
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
@@ -121,6 +123,8 @@ async def test_already_configured_aborts(recorder_mock, hass, enable_custom_inte
         json={"token": MOCK_TOKEN, "ingest_url": MOCK_INGEST_URL},
         status=200,
     )
+    # A set-up entry posts its first reading at once.
+    aioclient_mock.post(MOCK_INGEST_URL, json={"ok": True}, status=200)
 
     with patch(
         "homeassistant.helpers.instance_id.async_get", return_value="fixed-instance-id"
