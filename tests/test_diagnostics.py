@@ -15,7 +15,7 @@ from .helpers import (
 from custom_components.sunplug.const import DOMAIN
 
 
-async def test_diagnostics_redacts_token(
+async def test_diagnostics_redacts_credentials(
     recorder_mock, hass, enable_custom_integrations, aioclient_mock
 ):
     # Setup posts the current states at once, so the endpoint is mocked.
@@ -54,4 +54,5 @@ async def test_diagnostics_redacts_token(
 
     diag = await async_get_config_entry_diagnostics(hass, entry)
     assert diag["entry_data"]["token"] == "**REDACTED**"
+    assert diag["entry_data"]["ingest_url"] == "**REDACTED**"
     assert diag["sender"]["roles"]["solar"] == ["sensor.solar_power"]
