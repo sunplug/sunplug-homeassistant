@@ -12,7 +12,8 @@ from homeassistant.helpers import entity_registry as er
 from custom_components.sunplug.const import CONF_INGEST_URL, CONF_TOKEN
 
 MOCK_TOKEN = "test-token"
-MOCK_INGEST_URL = "https://ingest.sunplug.app/v1/ingest/abc123"
+# The shape the backend issues at pairing: a regional endpoint, no identifier.
+MOCK_INGEST_URL = "https://api.sunplug.app/ingest/site"
 
 
 async def async_set_energy_prefs(
