@@ -6,7 +6,7 @@ import logging
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from homeassistant.const import UnitOfPower
 from homeassistant.core import (
@@ -35,6 +35,7 @@ from .const import (
     CONF_TOKEN,
     DOMAIN,
     GAP_HISTORY_LEN,
+    GAP_MAX_S,
     ISSUE_SLOW_ENTITY,
     KNOWN_SLOW_CLOUD_INTEGRATIONS,
     MIN_SEND_INTERVAL_S,
@@ -52,6 +53,12 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Held values a role may report as 0 once its sensor stops writing (see
+# _role_kw). Solar below 0 is inverter standby and is clamped to 0 anyway; a
+# battery below 0 is charging, which is not zero.
+_SOLAR_HOLDS: Callable[[float], bool] = lambda kw: kw <= 0
+_BATTERY_HOLDS: Callable[[float], bool] = lambda kw: kw == 0
+
 
 @dataclass
 class _EntityTracking:
@@ -63,7 +70,7 @@ class _EntityTracking:
     def record(self, reported_at: datetime) -> None:
         if self.last_reported is not None:
             gap = (reported_at - self.last_reported).total_seconds()
-            if gap > 0:
+            if 0 < gap <= GAP_MAX_S:
                 self.gaps_s.append(gap)
                 if len(self.gaps_s) > GAP_HISTORY_LEN:
                     self.gaps_s.pop(0)
@@ -288,7 +295,11 @@ class SunplugSender:
     # -- payload building -------------------------------------------------
 
     def _role_kw(
-        self, role_entities: list[str], now: datetime
+        self,
+        role_entities: list[str],
+        now: datetime,
+        *,
+        holds: Callable[[float], bool] | None = None,
     ) -> tuple[float | None, datetime | None, str | None]:
         """Sum a role's power entities in kW. Returns (value, newest_ts, reason).
 
@@ -300,38 +311,57 @@ class SunplugSender:
         `_is_stale` check tripped) or "unknown" (unavailable, unknown,
         non-numeric, or missing) — the caller maps that to a specific
         const.STAT_REASONS entry, since only it knows which role this is.
+
+        A stale entity still available with a value `holds` accepts counts
+        as 0: many integrations write nothing while a value holds, and solar
+        holds at 0 all night. Only zero is safe to hold, since it never
+        invents surplus; any other held value stays stale.
         """
         total = 0.0
         newest: datetime | None = None
         if not role_entities:
             return None, None, "unknown"
         for entity_id in role_entities:
-            if self._is_stale(entity_id, now):
+            stale = self._is_stale(entity_id, now)
+            if stale and holds is None:
                 return None, None, "stale"
+            unknown = "stale" if stale else "unknown"
             state = self.hass.states.get(entity_id)
             if state is None or state.state in (None, "unknown", "unavailable"):
-                return None, None, "unknown"
+                return None, None, unknown
             try:
                 value = float(state.state)
             except (TypeError, ValueError):
-                return None, None, "unknown"
+                return None, None, unknown
             unit = state.attributes.get("unit_of_measurement", UnitOfPower.WATT)
             try:
                 kw = PowerConverter.convert(value, unit, UnitOfPower.KILO_WATT)
             except HomeAssistantError:
-                return None, None, "unknown"
+                return None, None, unknown
+            if stale:
+                if not holds(kw):
+                    return None, None, "stale"
+                # Held at zero: it adds nothing, and its old report does not
+                # date the reading.
+                continue
             total += kw
             if newest is None or state.last_reported > newest:
                 newest = state.last_reported
         return total, newest, None
 
     def _soc_fraction(
-        self, entities: list[str], now: datetime
+        self, entities: list[str], now: datetime, *, battery_idle: bool = False
     ) -> tuple[float | None, datetime | None]:
+        """Mean state of charge of the fresh entities, as a fraction.
+
+        While the battery is idle its charge cannot move, so a stale entity
+        still available holds a value that is still true, and counts.
+        """
         values: list[float] = []
         newest: datetime | None = None
         for entity_id in entities:
-            if self._is_stale(entity_id, now):
+            held = self._is_stale(entity_id, now)
+            if held and not battery_idle:
                 continue
             state = self.hass.states.get(entity_id)
             if state is None or state.state in (None, "unknown", "unavailable"):
@@ -341,6 +371,8 @@ class SunplugSender:
             except (TypeError, ValueError):
                 continue
             values.append(value)
+            if held:
+                continue
             if newest is None or state.last_reported > newest:
                 newest = state.last_reported
         if not values:
@@ -392,7 +424,9 @@ class SunplugSender:
     def _build_payload(self) -> dict[str, Any] | None:
         now = dt_util.utcnow()
 
-        solar_kw, solar_ts, solar_reason = self._role_kw(self.roles.solar, now)
+        solar_kw, solar_ts, solar_reason = self._role_kw(
+            self.roles.solar, now, holds=_SOLAR_HOLDS
+        )
         if solar_kw is None:
             self._async_record_reading_skip(ROLE_SOLAR, solar_reason)
             return None
@@ -414,18 +448,24 @@ class SunplugSender:
             "interval_s": self.interval_s,
         }
 
+        battery_idle = False
         if not self.roles.battery_configured:
             payload["battery_discharge_kw"] = None
         else:
-            battery_kw, battery_ts, _reason = self._role_kw(self.roles.battery, now)
+            battery_kw, battery_ts, _reason = self._role_kw(
+                self.roles.battery, now, holds=_BATTERY_HOLDS
+            )
             if battery_kw is not None:
+                battery_idle = battery_kw == 0
                 payload["battery_discharge_kw"] = round(battery_kw, 3)
                 if battery_ts is not None:
                     timestamps.append(battery_ts)
             # else: configured but currently unknown -> key omitted.
 
         if self.roles.battery_soc:
-            soc, soc_ts = self._soc_fraction(self.roles.battery_soc, now)
+            soc, soc_ts = self._soc_fraction(
+                self.roles.battery_soc, now, battery_idle=battery_idle
+            )
             if soc is not None:
                 payload["battery_soc"] = round(soc, 3)
                 if soc_ts is not None:
