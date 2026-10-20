@@ -742,7 +742,7 @@ async def test_a_restart_does_not_wait_for_every_sensor_to_report_again(hass):
 
 
 async def test_setup_sends_the_current_states_without_waiting_for_a_change(
-    hass, aioclient_mock, freezer
+    hass, enable_custom_integrations, aioclient_mock, freezer
 ):
     """Paired while every sensor sits still: the first reading goes out anyway."""
     from .helpers import async_set_energy_prefs
@@ -861,6 +861,23 @@ async def test_payload_omits_ha_stats_when_empty(hass):
     set_power_state(hass, "sensor.grid_power", 100)
     payload = sender._build_payload()
     assert "ha_stats" not in payload
+
+
+async def test_payload_omits_agent_version_when_unknown(hass):
+    """A sender not yet set up has no version, and says nothing rather than ''."""
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", 100)
+    set_power_state(hass, "sensor.grid_power", 100)
+    assert "agent_version" not in sender._build_payload()
+
+    sender.version = "9.9.9"
+    assert sender._build_payload()["agent_version"] == "9.9.9"
 
 
 async def test_stats_sent_with_next_successful_post_and_reset_after_200(
