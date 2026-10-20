@@ -26,6 +26,7 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_state_report_event,
 )
+from homeassistant.loader import async_get_integration
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import PowerConverter
 
@@ -116,11 +117,16 @@ class SunplugSender:
         # info once when it clears, silent while the condition persists.
         self._reading_unavailable = False
         self._post_failing = False
+        # This integration's manifest version, sent with every reading as
+        # "agent_version" so Sunplug knows which release a household runs.
+        self.version = ""
 
     # -- setup / teardown -------------------------------------------------
 
     async def async_setup(self) -> None:
         """Resolve roles, subscribe to state and preference changes."""
+        integration = await async_get_integration(self.hass, DOMAIN)
+        self.version = str(integration.version or "")
         await self._async_reload_roles()
 
         from homeassistant.components.energy.data import async_get_manager
@@ -483,6 +489,8 @@ class SunplugSender:
             return None
         payload["tsms"] = int(max(timestamps).timestamp() * 1000)
         payload["ingest_url"] = self.entry.data[CONF_INGEST_URL]
+        if self.version:
+            payload["agent_version"] = self.version
 
         if self._stats:
             payload["ha_stats"] = dict(self._stats)
@@ -614,6 +622,7 @@ class SunplugSender:
 
     def diagnostics_data(self) -> dict[str, Any]:
         return {
+            "version": self.version,
             "roles": {
                 "solar": self.roles.solar,
                 "grid": self.roles.grid,

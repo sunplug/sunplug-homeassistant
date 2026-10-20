@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from homeassistant.config_entries import ConfigEntryState
 
 from custom_components.sunplug.const import DOMAIN
@@ -63,3 +66,47 @@ async def test_setup_and_unload_entry(
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.NOT_LOADED
+
+
+async def test_readings_carry_the_manifest_version(
+    recorder_mock, hass, enable_custom_integrations, aioclient_mock
+):
+    """Sunplug learns which release a household runs from every reading."""
+    manifest = Path(__file__).parents[1] / "custom_components/sunplug/manifest.json"
+    version = json.loads(manifest.read_text())["version"]
+    aioclient_mock.post(MOCK_INGEST_URL, json={"ok": True}, status=200)
+    await async_set_energy_prefs(
+        hass,
+        [
+            {
+                "type": "solar",
+                "stat_energy_from": "sensor.solar_energy",
+                "stat_rate": "sensor.solar_power",
+                "config_entry_solar_forecast": None,
+            },
+            {
+                "type": "grid",
+                "stat_energy_from": "sensor.grid_energy_in",
+                "stat_energy_to": None,
+                "stat_cost": None,
+                "entity_energy_price": None,
+                "number_energy_price": None,
+                "stat_compensation": None,
+                "entity_energy_price_export": None,
+                "number_energy_price_export": None,
+                "stat_rate": "sensor.grid_power",
+                "cost_adjustment_day": 0.0,
+            },
+        ],
+    )
+    set_power_state(hass, "sensor.solar_power", 100)
+    set_power_state(hass, "sensor.grid_power", 50)
+
+    entry = MockConfigEntry(domain=DOMAIN, data=mock_config_entry_data())
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert len(aioclient_mock.mock_calls) == 1
+    assert aioclient_mock.mock_calls[0][2]["agent_version"] == version
+    assert entry.runtime_data.diagnostics_data()["version"] == version
