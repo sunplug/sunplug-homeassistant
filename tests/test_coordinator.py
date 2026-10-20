@@ -261,6 +261,155 @@ async def test_build_payload_stale_entity_treated_as_unknown(hass):
     assert sender._build_payload() is None
 
 
+
+# -- values held while a sensor writes nothing ----------------------------------
+
+
+def _battery_sender(hass, *, soc: bool = False) -> SunplugSender:
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(
+        solar=["sensor.solar_power"],
+        grid=["sensor.grid_power"],
+        battery=["sensor.battery_power"],
+        battery_soc=["sensor.battery_soc"] if soc else [],
+        battery_configured=True,
+    )
+    return sender
+
+
+async def test_solar_held_at_zero_overnight_still_reads(hass):
+    """Solar at 0 that has written nothing for six hours is still 0, and the
+    reading goes out on grid's own time."""
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now - timedelta(hours=6)),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", 0)
+    set_power_state(hass, "sensor.grid_power", 55)
+    payload = sender._build_payload()
+    assert payload["production_kw"] == 0.0
+    assert payload["net_import_kw"] == 0.055
+    grid = hass.states.get("sensor.grid_power")
+    assert payload["tsms"] == int(grid.last_reported.timestamp() * 1000)
+    assert sender._stats == {}
+
+
+async def test_solar_held_at_standby_below_zero_reads_as_zero(hass):
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now - timedelta(hours=6)),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", -5)
+    set_power_state(hass, "sensor.grid_power", 55)
+    assert sender._build_payload()["production_kw"] == 0.0
+
+
+async def test_solar_held_above_zero_is_still_stale(hass):
+    """A frozen 2.5 kW would invent surplus: it never counts as held."""
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now - timedelta(hours=6)),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    set_power_state(hass, "sensor.solar_power", 2500)
+    set_power_state(hass, "sensor.grid_power", 55)
+    assert sender._build_payload() is None
+    assert sender._stats == {"sensor_stale": 1}
+
+
+@pytest.mark.parametrize(
+    ("age", "stat"),
+    [(timedelta(0), "solar_unknown"), (timedelta(hours=6), "sensor_stale")],
+)
+async def test_solar_unavailable_still_stops_readings(hass, age, stat):
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now - age),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+    }
+    hass.states.async_set("sensor.solar_power", "unavailable")
+    set_power_state(hass, "sensor.grid_power", 55)
+    assert sender._build_payload() is None
+    assert sender._stats == {stat: 1}
+
+
+async def test_grid_held_at_zero_is_still_stale(hass):
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now - timedelta(hours=6)),
+    }
+    set_power_state(hass, "sensor.solar_power", 0)
+    set_power_state(hass, "sensor.grid_power", 0)
+    assert sender._build_payload() is None
+    assert sender._stats == {"sensor_stale": 1}
+
+
+@pytest.mark.parametrize(("watts", "expected"), [(0, 0.0), (300, None), (-300, None)])
+async def test_battery_power_holds_only_at_exactly_zero(hass, watts, expected):
+    """Idle holds; a frozen discharge or charge is omitted as unknown."""
+    sender = _battery_sender(hass)
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+        "sensor.battery_power": _EntityTracking(last_reported=now - timedelta(hours=6)),
+    }
+    set_power_state(hass, "sensor.solar_power", 0)
+    set_power_state(hass, "sensor.grid_power", 55)
+    set_power_state(hass, "sensor.battery_power", watts)
+    payload = sender._build_payload()
+    assert payload.get("battery_discharge_kw") == expected
+
+
+@pytest.mark.parametrize(
+    ("battery", "expected"),
+    [("0", 0.1), ("300", None), ("unknown", None)],
+)
+async def test_battery_soc_holds_only_while_the_battery_is_idle(hass, battery, expected):
+    """An idle battery's charge cannot move, so its held SOC is still true."""
+    sender = _battery_sender(hass, soc=True)
+    now = dt_util.utcnow()
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(last_reported=now),
+        "sensor.grid_power": _EntityTracking(last_reported=now),
+        "sensor.battery_power": _EntityTracking(last_reported=now),
+        "sensor.battery_soc": _EntityTracking(last_reported=now - timedelta(hours=6)),
+    }
+    set_power_state(hass, "sensor.solar_power", 0)
+    set_power_state(hass, "sensor.grid_power", 55)
+    hass.states.async_set("sensor.battery_power", battery, {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.battery_soc", "10", {"unit_of_measurement": "%"})
+    payload = sender._build_payload()
+    assert payload.get("battery_soc") == expected
+    grid = hass.states.get("sensor.grid_power")
+    assert payload["tsms"] == int(grid.last_reported.timestamp() * 1000)
+
+
+async def test_a_gap_longer_than_an_hour_is_a_hold_not_a_period(hass):
+    start = dt_util.utcnow()
+    track = _EntityTracking()
+    track.record(start)
+    track.record(start + timedelta(seconds=60))
+    track.record(start + timedelta(seconds=60, hours=6))
+    track.record(start + timedelta(seconds=120, hours=6))
+    assert track.gaps_s == [60, 60]
+    track.record(start + timedelta(seconds=120, hours=7))
+    assert track.gaps_s == [60, 60, 3600]
+
+
 # -- result handling ------------------------------------------------------------
 
 
@@ -870,3 +1019,61 @@ async def test_counts_added_while_a_post_is_in_flight_survive_its_200(hass):
     sender._stats["grid_unknown"] += 2  # counted while the post was in flight
     await sender._async_handle_result(PostResult(status=200), carried)
     assert sender._stats == {"grid_unknown": 2}
+
+
+async def test_overnight_solar_hold_keeps_readings_flowing(hass, aioclient_mock, freezer):
+    """The reported case: solar writes 0 at dusk and nothing more until first
+    sun six hours later, while grid keeps changing every two minutes."""
+    start = dt_util.utcnow()
+    freezer.move_to(start)
+    aioclient_mock.post(MOCK_INGEST_URL, json={"ok": True}, status=200)
+
+    sender = _make_sender(hass)
+    sender.roles = EnergyRoles(solar=["sensor.solar_power"], grid=["sensor.grid_power"])
+    sender._unsub = []
+    sender._tracking = {
+        "sensor.solar_power": _EntityTracking(),
+        "sensor.grid_power": _EntityTracking(),
+    }
+
+    from homeassistant.helpers.event import (
+        async_track_state_change_event,
+        async_track_state_report_event,
+    )
+
+    tracked = ["sensor.solar_power", "sensor.grid_power"]
+    sender._unsub.append(
+        async_track_state_change_event(hass, tracked, sender._async_state_event)
+    )
+    sender._unsub.append(
+        async_track_state_report_event(hass, tracked, sender._async_state_event)
+    )
+
+    set_power_state(hass, "sensor.solar_power", 0)
+    steps = 6 * 60 // 2
+    for i in range(steps):
+        now = start + timedelta(minutes=2 * i)
+        freezer.move_to(now)
+        set_power_state(hass, "sensor.grid_power", 40 + i % 2)
+        async_fire_time_changed(hass, now, fire_all=True)
+        await hass.async_block_till_done()
+
+    assert len(aioclient_mock.mock_calls) == steps
+    last = aioclient_mock.mock_calls[-1][2]
+    assert last["production_kw"] == 0.0
+    assert "ha_stats" not in last
+    assert sender._stats == {}
+
+    # First sun: the six-hour gap stays out of the period and raises no repair.
+    first_sun = start + timedelta(hours=6)
+    freezer.move_to(first_sun)
+    set_power_state(hass, "sensor.solar_power", 210, platform="luxpower")
+    async_fire_time_changed(hass, first_sun, fire_all=True)
+    await hass.async_block_till_done()
+    assert sender._tracking["sensor.solar_power"].gaps_s == []
+    assert sender.interval_s == 120
+    assert ir.async_get(hass).async_get_issue("sunplug", "slow_entity_sensor.solar_power") is None
+    assert aioclient_mock.mock_calls[-1][2]["production_kw"] == 0.21
+
+    if sender._pending_send_unsub is not None:
+        sender._pending_send_unsub()

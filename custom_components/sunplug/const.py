@@ -18,6 +18,10 @@ CONF_INGEST_URL: Final = "ingest_url"
 MIN_SEND_INTERVAL_S: Final = 30
 # Number of inter-report gaps kept per tracked entity to estimate its period.
 GAP_HISTORY_LEN: Final = 10
+# A gap longer than this is a value held (solar at 0 overnight), not a polling
+# period: it stays out of the measured period. The slowest cloud integrations
+# we know poll every 15 minutes.
+GAP_MAX_S: Final = 60 * 60
 # An entity counts as stale when its last report is older than
 # max(STALE_MULTIPLIER * measured_period, STALE_FLOOR_S).
 STALE_MULTIPLIER: Final = 3
